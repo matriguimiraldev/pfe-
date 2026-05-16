@@ -1,25 +1,22 @@
 ﻿import os
 import tempfile
+
 from fastapi import UploadFile
-from faster_whisper import WhisperModel
+from mistralai.client import Mistral
+from mistralai.client.models.file import File
 
 from app.voice.transcript_postprocess import normalize_transcript_for_routes
 
 
-# Chargement du modèle une seule fois au démarrage
-# Pour V1 : small + CPU + int8 = bon compromis
-model = WhisperModel(
-    "small",
-    device="cpu",
-    compute_type="int8"
+# API KEY
+client = Mistral(
+    api_key=os.getenv("MISTRAL_API_KEY")
 )
 
 
 async def transcribe_audio_local(file: UploadFile) -> str:
     """
-    Reçoit un fichier audio UploadFile depuis FastAPI,
-    le sauvegarde temporairement,
-    puis utilise faster-whisper pour le transcrire en français.
+    Transcription audio avec Mistral STT (Voxtral).
     """
 
     suffix = ".webm"
@@ -34,23 +31,37 @@ async def transcribe_audio_local(file: UploadFile) -> str:
         temp_audio_path = temp_audio.name
 
     try:
-        segments, info = model.transcribe(
-            temp_audio_path,
-            language="fr",
-            beam_size=5,
-            vad_filter=True
+
+        with open(temp_audio_path, "rb") as audio_file:
+            audio_bytes = audio_file.read()
+
+            # Determine content type from filename
+            content_type = "audio/webm"
+            if temp_audio_path.endswith(".mp3"):
+                content_type = "audio/mpeg"
+            elif temp_audio_path.endswith(".wav"):
+                content_type = "audio/wav"
+            elif temp_audio_path.endswith(".m4a"):
+                content_type = "audio/mp4"
+
+            transcription = client.audio.transcriptions.complete(
+                model="voxtral-mini-transcribe-v2",
+                file=File(
+                    fileName=os.path.basename(temp_audio_path),
+                    content=audio_bytes,
+                    content_type=content_type
+                )
+            )
+
+        transcript = transcription.text.strip()
+
+        transcript = normalize_transcript_for_routes(
+            transcript
         )
-
-        transcript_parts = []
-
-        for segment in segments:
-            transcript_parts.append(segment.text.strip())
-
-        transcript = " ".join(transcript_parts).strip()
-        transcript = normalize_transcript_for_routes(transcript)
 
         return transcript
 
     finally:
+
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
