@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+faster-whisper
+Piper
+openai
+python-dotenv
+langchain-core
+langchain-openai
