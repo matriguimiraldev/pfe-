@@ -48,6 +48,10 @@ Swagger: <http://127.0.0.1:8000/docs>
 - `REAL_TIME_ZIGZAG_CONNECT_TIMEOUT`
 - `REAL_TIME_ZIGZAG_READ_TIMEOUT`
 - `REAL_TIME_ZIGZAG_RECONNECT_DELAY`
+- `ORS_DIRECTIONS_URL`: endpoint ORS driving-car
+- `SFAX_CENTER_LNG`, `SFAX_CENTER_LAT`: centre kilométrique, Beb Jebli
+- `ROUTE_KM_TOLERANCE_KM`: marge autour du kilomètre demandé, défaut `1`
+- `ROUTE_KM_RADIUS_M`: distance maximale du livreur à la route, défaut `1000`
 - `PIPER_EXE`: chemin explicite vers `piper.exe` si absent du PATH
 
 ## Tests à exécuter

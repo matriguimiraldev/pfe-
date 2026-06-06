@@ -16,10 +16,35 @@ def extract_zone_id(question: str) -> Optional[int]:
 	return 1
 
 
+def extract_route_kilometer(question: str) -> Optional[float]:
+	text = _normalize_text(question or "")
+	patterns = [
+		r"\b(?:kilometre|kilometres|km|klm)\s*[:#-]?\s*(\d+(?:[.,]\d+)?)\b",
+		r"\b(\d+(?:[.,]\d+)?)\s*(?:kilometre|kilometres|km|klm)\b",
+	]
+	for pattern in patterns:
+		match = re.search(pattern, text)
+		if match:
+			return float(match.group(1).replace(",", "."))
+	return None
+
+
 def extract_place_query(question: str) -> Optional[str]:
 	text = (question or "").strip().replace("_", " ")
 	if not text:
 		return None
+	text = re.sub(
+		r"\b(?:kilom[eè]tre|kilometre|kilometres|km|klm)\s*[:#-]?\s*\d+(?:[.,]\d+)?\b",
+		" ",
+		text,
+		flags=re.IGNORECASE,
+	)
+	text = re.sub(
+		r"\b\d+(?:[.,]\d+)?\s*(?:kilom[eè]tre|kilometre|kilometres|km|klm)\b",
+		" ",
+		text,
+		flags=re.IGNORECASE,
+	)
 
 	patterns = [
 		r"\b((?:route|ceinture|avenue|cite|quartier)\s+(?:de|du|des|d')?\s*[\w\u00C0-\u024F\u0600-\u06FF\- ]+)",
@@ -80,6 +105,7 @@ def detect_intent(question: str) -> Tuple[Optional[str], Dict[str, Any]]:
 	has_current_intent = any(k in q for k in ["actuelle", "actuelles", "active", "actives", "en cours", "maintenant"])
 
 	place_query = extract_place_query(question)
+	route_km = extract_route_kilometer(question)
 	zone_id = extract_zone_id(question)
 
 	if has_order_intent and (has_count_intent or has_current_intent or "zone" in q or "sfax" in q):
@@ -87,6 +113,12 @@ def detect_intent(question: str) -> Tuple[Optional[str], Dict[str, Any]]:
 
 	if has_driver_intent and (has_status_intent or (has_count_intent and ("zone" in q or "sfax" in q))):
 		return "drivers_by_status", {"zone_id": zone_id}
+
+	if has_driver_intent and route_km is not None and place_query:
+		return "drivers_near_route_kilometer", {
+			"route_query": place_query,
+			"target_km": route_km,
+		}
 
 	# Generic request: list drivers with their assigned/closest routes.
 	if has_driver_intent and "route" in q and (_is_route_assignment_request(q) or place_query is None):

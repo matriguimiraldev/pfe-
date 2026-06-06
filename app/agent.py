@@ -1,7 +1,11 @@
 from typing import Any, Dict
 
 from app.intent_detector import detect_intent
-from app.tools.driver_tools import get_drivers_on_route, get_nearest_driver_on_route
+from app.tools.driver_tools import (
+	get_drivers_near_route_kilometer,
+	get_drivers_on_route,
+	get_nearest_driver_on_route,
+)
 from app.tools.live_tools import (
 	get_current_orders_in_zone,
 	get_driver_by_id,
@@ -63,6 +67,42 @@ def run_dispatch_agent(question: str) -> Dict[str, Any]:
 				answer = (
 					f"J'ai trouve {count} livreur(s) proches de {route_name}, "
 					"mais les IDs ne sont pas disponibles."
+				)
+
+	elif intent == "drivers_near_route_kilometer":
+		tool_result = get_drivers_near_route_kilometer(
+			route_query=params["route_query"],
+			target_km=params["target_km"],
+		)
+		if not tool_result.get("route_found"):
+			answer = (
+				"Je n'ai pas trouve cette route dans le fichier des routes Sfax. "
+				"Peux-tu donner son nom exact ?"
+			)
+		else:
+			route_name = tool_result.get("route_name_fr") or params["route_query"]
+			target_km = float(tool_result.get("target_km") or params["target_km"])
+			tolerance_km = float(tool_result.get("tolerance_km") or 1)
+			drivers = tool_result.get("drivers") or []
+			ors_failures = int(tool_result.get("ors_failures") or 0)
+
+			if not drivers:
+				if ors_failures and ors_failures == int(tool_result.get("candidates_count") or 0):
+					answer = "Le calcul ORS est indisponible actuellement. Reessaie dans un instant."
+				else:
+					answer = (
+						f"Aucun livreur trouve sur {route_name} autour du kilometre "
+						f"{target_km:g} avec une marge de plus ou moins {tolerance_km:g} km."
+					)
+			else:
+				details = []
+				for driver in drivers[:10]:
+					dm_id = driver.get("dm_id") or driver.get("id") or "N/A"
+					road_km = float(driver.get("road_distance_from_sfax_center_km") or 0)
+					details.append(f"DM {dm_id} a {road_km:.1f} km")
+				answer = (
+					f"Sur {route_name}, autour du kilometre {target_km:g}: "
+					f"{len(drivers)} livreur(s) trouve(s). {', '.join(details)}."
 				)
 
 	elif intent == "nearest_driver_on_route":

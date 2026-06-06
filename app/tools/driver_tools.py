@@ -4,9 +4,12 @@ import math
 import os
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
 
 from app.tools.live_tools import get_driver_positions
 
@@ -14,6 +17,15 @@ ROUTES_CSV_PATH = (
     Path(__file__).resolve().parent / "data_sfax" / "sfax_routes_places_seed_v3_comma.csv"
 )
 DEFAULT_ROUTE_RADIUS_M = float(os.getenv("ROUTE_MATCH_RADIUS_M", "1500"))
+ORS_DIRECTIONS_URL = os.getenv(
+    "ORS_DIRECTIONS_URL",
+    "https://ors.zigzag-delivery-staging.com/ors/v2/directions/driving-car",
+).strip()
+SFAX_CENTER_LNG = float(os.getenv("SFAX_CENTER_LNG", "10.7597052"))
+SFAX_CENTER_LAT = float(os.getenv("SFAX_CENTER_LAT", "34.7374352"))
+ROUTE_KM_TOLERANCE_KM = float(os.getenv("ROUTE_KM_TOLERANCE_KM", "1"))
+ROUTE_KM_RADIUS_M = float(os.getenv("ROUTE_KM_RADIUS_M", "1000"))
+ORS_TIMEOUT_SECONDS = float(os.getenv("ORS_TIMEOUT_SECONDS", "10"))
 
 
 def _normalize_text(value: str) -> str:
@@ -248,6 +260,107 @@ def _distance_to_route_m(
             )
         )
     return min(distances) if distances else float("inf")
+
+
+def get_ors_road_distance_km(
+    end_lat: float,
+    end_lng: float,
+    start_lat: float = SFAX_CENTER_LAT,
+    start_lng: float = SFAX_CENTER_LNG,
+) -> Optional[float]:
+    """Return ORS driving distance in kilometers between two points."""
+    if not ORS_DIRECTIONS_URL:
+        return None
+
+    try:
+        response = httpx.get(
+            ORS_DIRECTIONS_URL,
+            params={
+                "start": f"{start_lng},{start_lat}",
+                "end": f"{end_lng},{end_lat}",
+            },
+            timeout=ORS_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        features = payload.get("features") or []
+        summary = ((features[0].get("properties") or {}).get("summary") or {}) if features else {}
+        distance_m = summary.get("distance")
+        if distance_m is None:
+            return None
+        return round(float(distance_m) / 1000.0, 3)
+    except (httpx.HTTPError, TypeError, ValueError, KeyError):
+        return None
+
+
+def get_drivers_near_route_kilometer(
+    route_query: str,
+    target_km: float,
+    tolerance_km: Optional[float] = None,
+    route_radius_m: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Find drivers near a named route and around a road kilometer from Sfax center.
+
+    Drivers must be within route_radius_m of the route geometry and their ORS
+    driving distance from Beb Jebli must be target_km +/- tolerance_km.
+    """
+    tolerance = float(tolerance_km) if tolerance_km is not None else ROUTE_KM_TOLERANCE_KM
+    radius_m = float(route_radius_m) if route_radius_m is not None else ROUTE_KM_RADIUS_M
+    route_result = get_drivers_on_route(route_query, max_distance_m=radius_m)
+    if not route_result.get("route_found"):
+        return {
+            "route_found": False,
+            "route_query": route_query,
+            "target_km": target_km,
+            "drivers": [],
+        }
+
+    candidates = route_result.get("drivers") or []
+    matched: List[Dict[str, Any]] = []
+    ors_failures = 0
+
+    def calculate(driver: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[float]]:
+        lat_lng = _extract_driver_lat_lng(driver)
+        if not lat_lng:
+            return driver, None
+        lat, lng = lat_lng
+        return driver, get_ors_road_distance_km(end_lat=lat, end_lng=lng)
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(candidates)))) as executor:
+        futures = [executor.submit(calculate, driver) for driver in candidates]
+        for future in as_completed(futures):
+            driver, road_distance_km = future.result()
+            if road_distance_km is None:
+                ors_failures += 1
+                continue
+            if abs(road_distance_km - target_km) <= tolerance:
+                item = dict(driver)
+                item["road_distance_from_sfax_center_km"] = road_distance_km
+                item["distance_to_target_km"] = round(abs(road_distance_km - target_km), 3)
+                matched.append(item)
+
+    matched.sort(
+        key=lambda item: (
+            item.get("distance_to_target_km", float("inf")),
+            item.get("distance_to_route_m", float("inf")),
+        )
+    )
+    return {
+        "route_found": True,
+        "route_query": route_query,
+        "route_id": route_result.get("route_id"),
+        "route_name_fr": route_result.get("route_name_fr"),
+        "center_name": "Beb Jebli",
+        "center": {"lat": SFAX_CENTER_LAT, "lng": SFAX_CENTER_LNG},
+        "target_km": float(target_km),
+        "tolerance_km": tolerance,
+        "route_radius_m": radius_m,
+        "candidates_count": len(candidates),
+        "ors_failures": ors_failures,
+        "drivers_count": len(matched),
+        "drivers": matched,
+    }
 
 
 def get_drivers_on_route(route_query: str, max_distance_m: Optional[float] = None) -> Dict[str, Any]:

@@ -1,3 +1,4 @@
+from app.tools.driver_tools import get_drivers_near_route_kilometer
 from app.tools.live_tools import (
     get_current_orders_in_zone,
     get_driver_by_id,
@@ -8,6 +9,7 @@ from app.tools.live_tools import (
 )
 
 __all__ = [
+    "get_drivers_near_route_kilometer",
     "live_tools_service",
     "get_driver_positions",
     "get_driver_by_id",
