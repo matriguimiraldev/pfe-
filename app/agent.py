@@ -2,7 +2,13 @@ from typing import Any, Dict
 
 from app.intent_detector import detect_intent
 from app.tools.driver_tools import get_drivers_on_route, get_nearest_driver_on_route
-from app.tools.live_tools import get_driver_by_id, get_driver_positions, get_zone_live_load, get_drivers_by_status_in_zone
+from app.tools.live_tools import (
+	get_current_orders_in_zone,
+	get_driver_by_id,
+	get_driver_positions,
+	get_drivers_by_status_in_zone,
+	get_zone_live_load,
+)
 from app.tools.map_tools import get_drivers_routes_map
 
 
@@ -98,34 +104,40 @@ def run_dispatch_agent(question: str) -> Dict[str, Any]:
 		else:
 			dm_id = tool_result.get("dm_id") or tool_result.get("id") or params["dm_id"]
 			zone_id = tool_result.get("zone_id")
-			status = tool_result.get("status") or "inconnu"
+			status = tool_result.get("public_status") or tool_result.get("status") or "inconnu"
 			answer = f"DM {dm_id} est en statut {status} (zone {zone_id})."
 
 	elif intent == "drivers_by_status":
-		tool_result = get_drivers_by_status_in_zone(zone_id=1)
+		tool_result = get_drivers_by_status_in_zone(zone_id=params.get("zone_id") or 1)
 		zone_name = tool_result.get("zone_name") or "Sfax"
 		status_counts = tool_result.get("status_counts") or {}
 
 		available_count = int(status_counts.get("disponible") or 0)
-		occupied_count = int(status_counts.get("occupé") or 0)
+		occupied_count = int(status_counts.get("occupe") or 0)
 
 		if available_count == 0 and occupied_count == 0:
 			answer = f"Aucun livreur dans {zone_name}."
 		else:
 			answer = (
 				f"Dans {zone_name}: {available_count} livreur(s) disponible(s) "
-				f"et {occupied_count} livreur(s) occupé(s)."
+				f"et {occupied_count} livreur(s) occupe(s)."
 			)
 
+	elif intent == "current_orders":
+		tool_result = get_current_orders_in_zone(zone_id=params.get("zone_id") or 1)
+		zone_name = tool_result.get("zone_name") or "Sfax"
+		current_orders_count = int(tool_result.get("current_orders_count") or 0)
+		answer = f"Dans {zone_name}: {current_orders_count} commande(s) actuelle(s)."
+
 	elif intent == "zone_live_load":
-		tool_result = get_zone_live_load(zone_id=1)
+		tool_result = get_zone_live_load(zone_id=params.get("zone_id") or 1)
 		zone_name = tool_result.get("zone_name") or f"zone {params.get('zone_id')}"
 		drivers_online = int(tool_result.get("drivers_online") or 0)
 		active_orders = int(tool_result.get("active_orders") or 0)
 		answer = f"{zone_name}: {drivers_online} livreur(s) en ligne et {active_orders} commande(s) active(s)."
 
 	elif intent == "driver_positions":
-		tool_result = get_driver_positions(zone_id=1)[:50]
+		tool_result = get_driver_positions(zone_id=params.get("zone_id"))[:50]
 		answer = f"J'ai {len(tool_result)} position(s) live disponibles."
 
 	return {

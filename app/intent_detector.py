@@ -1,12 +1,18 @@
 import re
+import unicodedata
 from typing import Any, Dict, Optional, Tuple
 
 from app.tools.driver_tools import find_route_by_query
-from app.tools.live_tools import ZONES
+
+
+def _normalize_text(value: str) -> str:
+	text = unicodedata.normalize("NFKD", (value or "").lower())
+	text = "".join(ch for ch in text if not unicodedata.combining(ch))
+	return re.sub(r"\s+", " ", text).strip()
 
 
 def extract_zone_id(question: str) -> Optional[int]:
-	# Always return Sfax zone_id=1
+	# The current product scope has one live zone: Sfax.
 	return 1
 
 
@@ -16,9 +22,9 @@ def extract_place_query(question: str) -> Optional[str]:
 		return None
 
 	patterns = [
-		r"\b((?:route|ceinture|avenue|cite|cité|quartier)\s+(?:de|du|des|d')?\s*[\w\u00C0-\u024F\u0600-\u06FF\- ]+)",
+		r"\b((?:route|ceinture|avenue|cite|quartier)\s+(?:de|du|des|d')?\s*[\w\u00C0-\u024F\u0600-\u06FF\- ]+)",
 		r"\b((?:bab|medina)\s+[\w\u00C0-\u024F\u0600-\u06FF\- ]+)",
-		r"\b(?:proche|proches|près|pres)\s+(?:de|du|des|d')?\s*([\w\u00C0-\u024F\u0600-\u06FF\- ]+)",
+		r"\b(?:proche|proches|pres|pres de)\s+(?:de|du|des|d')?\s*([\w\u00C0-\u024F\u0600-\u06FF\- ]+)",
 	]
 	for pattern in patterns:
 		m = re.search(pattern, text, flags=re.IGNORECASE)
@@ -49,17 +55,38 @@ def _is_route_assignment_request(q: str) -> bool:
 
 
 def detect_intent(question: str) -> Tuple[Optional[str], Dict[str, Any]]:
-	q = (question or "").lower()
+	q = _normalize_text(question or "")
 
 	has_driver_intent = any(k in q for k in ["livreur", "livreurs", "driver", "drivers", "coursier", "coursiers"])
-	has_place_hint = any(
-		k in q
-		for k in ["route", "ceinture", "avenue", "cite", "cité", "quartier", "zone", "bab", "medina", "sfax"]
-	)
 	has_nearest_intent = any(k in q for k in ["plus proche", "proche de", "nearest", "closest", "le plus proche"])
-	has_status_intent = any(k in q for k in ["statut", "status", "disponible", "actif", "offline", "en ligne", "occupé"])
+	has_count_intent = any(k in q for k in ["nombre", "combien", "count", "total"])
+	has_status_intent = any(
+		k in q
+		for k in [
+			"statut",
+			"statu",
+			"status",
+			"etat",
+			"disponible",
+			"libre",
+			"actif",
+			"offline",
+			"en ligne",
+			"occupe",
+			"occupes",
+		]
+	)
+	has_order_intent = any(k in q for k in ["commande", "commandes", "order", "orders"])
+	has_current_intent = any(k in q for k in ["actuelle", "actuelles", "active", "actives", "en cours", "maintenant"])
 
 	place_query = extract_place_query(question)
+	zone_id = extract_zone_id(question)
+
+	if has_order_intent and (has_count_intent or has_current_intent or "zone" in q or "sfax" in q):
+		return "current_orders", {"zone_id": zone_id}
+
+	if has_driver_intent and (has_status_intent or (has_count_intent and ("zone" in q or "sfax" in q))):
+		return "drivers_by_status", {"zone_id": zone_id}
 
 	# Generic request: list drivers with their assigned/closest routes.
 	if has_driver_intent and "route" in q and (_is_route_assignment_request(q) or place_query is None):
@@ -74,10 +101,6 @@ def detect_intent(question: str) -> Tuple[Optional[str], Dict[str, Any]]:
 	m_driver = re.search(r"(?:dm_id|livreur|driver)\s*[:#-]?\s*(\d+)", q)
 	if m_driver:
 		return "driver_by_id", {"dm_id": int(m_driver.group(1))}
-
-	zone_id = extract_zone_id(question)
-	if has_driver_intent and has_status_intent:
-		return "drivers_by_status", {"zone_id": zone_id}
 
 	live_keywords = ["position", "positions", "livreurs", "drivers", "carte", "flux", "charge"]
 	if any(keyword in q for keyword in live_keywords):

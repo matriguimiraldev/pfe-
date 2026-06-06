@@ -16,6 +16,24 @@ ZONES: Dict[int, Dict[str, Any]] = {
     1: {"name": "Sfax", "lat": 34.7406, "lng": 10.7603},
 }
 
+LIVE_COUNT_SYNC_WAIT_SECONDS = float(os.getenv("LIVE_COUNT_SYNC_WAIT_SECONDS", "6"))
+LIVE_COUNT_SYNC_QUIET_SECONDS = float(os.getenv("LIVE_COUNT_SYNC_QUIET_SECONDS", "0.35"))
+LIVE_DRIVER_TTL_SECONDS = float(os.getenv("LIVE_DRIVER_TTL_SECONDS", "12"))
+
+
+def _driver_has_active_orders(driver: Dict[str, Any]) -> bool:
+    commandes = driver.get("commandes") or []
+    if isinstance(commandes, list) and len(commandes) > 0:
+        return True
+
+    status = str(driver.get("status") or driver.get("statut") or "").strip().lower()
+    occupied_tokens = ["occupe", "occupé", "busy", "on_delivery", "en_course", "en cours"]
+    return any(token in status for token in occupied_tokens)
+
+
+def _driver_public_status(driver: Dict[str, Any]) -> str:
+    return "occupe" if _driver_has_active_orders(driver) else "disponible"
+
 
 @dataclass
 class LiveToolsConfig:
@@ -62,6 +80,14 @@ class LiveToolsService:
         with self._lock:
             items = list(self._drivers.values())
 
+        if self.config.stream_url and self._connected and LIVE_DRIVER_TTL_SECONDS > 0:
+            now = time.monotonic()
+            items = [
+                d
+                for d in items
+                if now - float(d.get("_live_seen_monotonic", now)) <= LIVE_DRIVER_TTL_SECONDS
+            ]
+
         if zone_id is not None:
             items = [d for d in items if d.get("zone_id") == zone_id]
         for item in items:
@@ -93,6 +119,44 @@ class LiveToolsService:
             "active_orders": active_orders,
             "orders_by_status": dict(status_counter),
         }
+
+    def wait_for_fresh_snapshot(self, max_wait_s: float, quiet_s: float = 0.35) -> float:
+        """
+        Wait for the next SSE burst to finish before reading counters.
+
+        The live feed updates every few seconds and may send many driver rows in a
+        burst. Counting during that burst can produce a mixed snapshot.
+        """
+        if max_wait_s <= 0:
+            return 0.0
+
+        with self._lock:
+            should_wait = bool(self.config.stream_url and self._connected)
+            last_events_seen = self._events_seen
+
+        if not should_wait:
+            return 0.0
+
+        started_at = time.monotonic()
+        deadline = started_at + max_wait_s
+        last_change_at = started_at
+        saw_event = False
+
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            now = time.monotonic()
+            with self._lock:
+                events_seen = self._events_seen
+
+            if events_seen != last_events_seen:
+                last_events_seen = events_seen
+                last_change_at = now
+                saw_event = True
+
+            if saw_event and now - last_change_at >= quiet_s:
+                break
+
+        return round(time.monotonic() - started_at, 3)
 
     def _run_loop(self) -> None:
         if not self.config.stream_url:
@@ -150,6 +214,8 @@ class LiveToolsService:
             return
 
         with self._lock:
+            obj["_live_seen_monotonic"] = time.monotonic()
+            obj["_live_seen_at"] = datetime.utcnow().isoformat() + "Z"
             self._drivers[int(dm_id)] = obj
             self._events_seen += 1
             self._last_event_at = datetime.utcnow().isoformat() + "Z"
@@ -180,6 +246,40 @@ def get_zone_live_load(zone_id: Optional[int] = None) -> Dict[str, Any]:
     return live_tools_service.get_zone_live_load(zone_id=zone_id)
 
 
+def get_current_orders_in_zone(zone_id: Optional[int] = None, sync_live: bool = True) -> Dict[str, Any]:
+    """Return the current active orders known from the live driver cache."""
+    snapshot_waited_s = 0.0
+    if sync_live:
+        snapshot_waited_s = live_tools_service.wait_for_fresh_snapshot(
+            max_wait_s=LIVE_COUNT_SYNC_WAIT_SECONDS,
+            quiet_s=LIVE_COUNT_SYNC_QUIET_SECONDS,
+        )
+
+    rows = live_tools_service.get_driver_positions(zone_id=zone_id)
+    orders: List[Dict[str, Any]] = []
+    orders_by_status: Counter[str] = Counter()
+
+    for driver in rows:
+        dm_id = driver.get("dm_id") or driver.get("id")
+        for order in driver.get("commandes") or []:
+            if not isinstance(order, dict):
+                continue
+            item = dict(order)
+            item["dm_id"] = dm_id
+            orders.append(item)
+            orders_by_status[str(order.get("status", "unknown"))] += 1
+
+    zone_name = ZONES.get(zone_id, {}).get("name") if zone_id is not None else None
+    return {
+        "zone_id": zone_id,
+        "zone_name": zone_name,
+        "snapshot_waited_s": snapshot_waited_s,
+        "current_orders_count": len(orders),
+        "orders_by_status": dict(orders_by_status),
+        "orders": orders[:50],
+    }
+
+
 def get_zone_id_by_name(zone_name: str) -> Optional[int]:
     normalized = (zone_name or "").strip().lower()
     if not normalized:
@@ -190,40 +290,52 @@ def get_zone_id_by_name(zone_name: str) -> Optional[int]:
     return None
 
 
-def get_drivers_by_status_in_zone(zone_id: Optional[int] = None, status_filter: Optional[str] = None) -> Dict[str, Any]:
-    """Return drivers in a zone grouped by their status."""
+def get_drivers_by_status_in_zone(
+    zone_id: Optional[int] = None,
+    status_filter: Optional[str] = None,
+    sync_live: bool = True,
+) -> Dict[str, Any]:
+    """Return drivers in a zone grouped by their dispatch status."""
+    snapshot_waited_s = 0.0
+    if sync_live:
+        snapshot_waited_s = live_tools_service.wait_for_fresh_snapshot(
+            max_wait_s=LIVE_COUNT_SYNC_WAIT_SECONDS,
+            quiet_s=LIVE_COUNT_SYNC_QUIET_SECONDS,
+        )
+
     rows = live_tools_service.get_driver_positions(zone_id=zone_id)
     available_drivers: List[Dict[str, Any]] = []
     occupied_drivers: List[Dict[str, Any]] = []
 
     for driver in rows:
-        commandes = driver.get("commandes") or []
-        driver_status = "occupé" if len(commandes) > 0 else "disponible"
+        driver_status = _driver_public_status(driver)
 
         if status_filter:
             normalized_filter = status_filter.strip().lower()
             if normalized_filter not in driver_status:
                 continue
 
-        if driver_status == "occupé":
-            occupied_drivers.append(driver)
-        else:
-            available_drivers.append(driver)
+        item = dict(driver)
+        item["public_status"] = driver_status
 
-    by_status: Dict[str, List[Dict[str, Any]]] = {
-        "disponible": available_drivers,
-        "occupé": occupied_drivers,
-    }
+        if driver_status == "occupe":
+            occupied_drivers.append(item)
+        else:
+            available_drivers.append(item)
 
     zone_name = ZONES.get(zone_id, {}).get("name") if zone_id is not None else None
     return {
         "zone_id": zone_id,
         "zone_name": zone_name,
-        "drivers_by_status": by_status,
+        "snapshot_waited_s": snapshot_waited_s,
+        "drivers_by_status": {
+            "disponible": available_drivers,
+            "occupe": occupied_drivers,
+        },
         "total_drivers": len(rows),
         "drivers_filtered": len(available_drivers) + len(occupied_drivers),
         "status_counts": {
             "disponible": len(available_drivers),
-            "occupé": len(occupied_drivers),
+            "occupe": len(occupied_drivers),
         },
     }

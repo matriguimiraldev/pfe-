@@ -9,8 +9,10 @@ from app.agent import run_dispatch_agent
 from app.llm.openai_chat import generate_answer
 from app.schemas import AgentAskResponse, TextAskRequest, TextToSpeechRequest, VoiceAskResponse
 from app.tools.live_tools import (
+    get_current_orders_in_zone,
     get_driver_by_id,
     get_driver_positions,
+    get_drivers_by_status_in_zone,
     get_zone_live_load,
     live_tools_service,
 )
@@ -70,6 +72,16 @@ def live_driver_by_id(dm_id: int):
 @app.get("/live/zone-load")
 def live_zone_load(zone_id: int | None = None):
     return get_zone_live_load(zone_id=zone_id)
+
+
+@app.get("/live/drivers-by-status")
+def live_drivers_by_status(zone_id: int | None = 1):
+    return get_drivers_by_status_in_zone(zone_id=zone_id)
+
+
+@app.get("/live/current-orders")
+def live_current_orders(zone_id: int | None = 1):
+    return get_current_orders_in_zone(zone_id=zone_id)
 
 
 @app.post("/voice/transcribe")
