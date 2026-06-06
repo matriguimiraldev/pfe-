@@ -1,4 +1,3 @@
-import time
 import unittest
 
 from app.agent import run_dispatch_agent
@@ -58,7 +57,7 @@ class LiveCountToolsTest(unittest.TestCase):
         self.assertEqual(agent_result["intent"], "current_orders")
         self.assertEqual(agent_result["answer"], "Dans Sfax: 20 commande(s) actuelle(s).")
 
-    def test_stale_drivers_are_ignored_when_sse_is_connected(self):
+    def test_drivers_remain_in_cache_between_sse_updates(self):
         with live_tools_service._lock:
             live_tools_service.config.stream_url = "http://sse.test/live"
             live_tools_service._connected = True
@@ -67,21 +66,19 @@ class LiveCountToolsTest(unittest.TestCase):
                     "dm_id": 1,
                     "zone_id": 1,
                     "commandes": [],
-                    "_live_seen_monotonic": time.monotonic(),
                 },
                 2: {
                     "dm_id": 2,
                     "zone_id": 1,
                     "commandes": [{"id": "old-cmd", "status": "active"}],
-                    "_live_seen_monotonic": time.monotonic() - 30,
                 },
             }
 
         result = get_drivers_by_status_in_zone(zone_id=1, sync_live=False)
 
-        self.assertEqual(result["total_drivers"], 1)
+        self.assertEqual(result["total_drivers"], 2)
         self.assertEqual(result["status_counts"]["disponible"], 1)
-        self.assertEqual(result["status_counts"]["occupe"], 0)
+        self.assertEqual(result["status_counts"]["occupe"], 1)
 
 
 if __name__ == "__main__":

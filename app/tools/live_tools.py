@@ -17,8 +17,6 @@ ZONES: Dict[int, Dict[str, Any]] = {
 }
 
 LIVE_COUNT_SYNC_WAIT_SECONDS = float(os.getenv("LIVE_COUNT_SYNC_WAIT_SECONDS", "6"))
-LIVE_COUNT_SYNC_QUIET_SECONDS = float(os.getenv("LIVE_COUNT_SYNC_QUIET_SECONDS", "0.35"))
-LIVE_DRIVER_TTL_SECONDS = float(os.getenv("LIVE_DRIVER_TTL_SECONDS", "12"))
 
 
 def _driver_has_active_orders(driver: Dict[str, Any]) -> bool:
@@ -80,14 +78,6 @@ class LiveToolsService:
         with self._lock:
             items = list(self._drivers.values())
 
-        if self.config.stream_url and self._connected and LIVE_DRIVER_TTL_SECONDS > 0:
-            now = time.monotonic()
-            items = [
-                d
-                for d in items
-                if now - float(d.get("_live_seen_monotonic", now)) <= LIVE_DRIVER_TTL_SECONDS
-            ]
-
         if zone_id is not None:
             items = [d for d in items if d.get("zone_id") == zone_id]
         for item in items:
@@ -120,42 +110,19 @@ class LiveToolsService:
             "orders_by_status": dict(status_counter),
         }
 
-    def wait_for_fresh_snapshot(self, max_wait_s: float, quiet_s: float = 0.35) -> float:
-        """
-        Wait for the next SSE burst to finish before reading counters.
-
-        The live feed updates every few seconds and may send many driver rows in a
-        burst. Counting during that burst can produce a mixed snapshot.
-        """
-        if max_wait_s <= 0:
+    def wait_for_fresh_snapshot(self, wait_s: float) -> float:
+        """Wait one complete SSE update interval before reading counters."""
+        if wait_s <= 0:
             return 0.0
 
         with self._lock:
             should_wait = bool(self.config.stream_url and self._connected)
-            last_events_seen = self._events_seen
 
         if not should_wait:
             return 0.0
 
         started_at = time.monotonic()
-        deadline = started_at + max_wait_s
-        last_change_at = started_at
-        saw_event = False
-
-        while time.monotonic() < deadline:
-            time.sleep(0.1)
-            now = time.monotonic()
-            with self._lock:
-                events_seen = self._events_seen
-
-            if events_seen != last_events_seen:
-                last_events_seen = events_seen
-                last_change_at = now
-                saw_event = True
-
-            if saw_event and now - last_change_at >= quiet_s:
-                break
-
+        self._stop_event.wait(timeout=wait_s)
         return round(time.monotonic() - started_at, 3)
 
     def _run_loop(self) -> None:
@@ -251,8 +218,7 @@ def get_current_orders_in_zone(zone_id: Optional[int] = None, sync_live: bool = 
     snapshot_waited_s = 0.0
     if sync_live:
         snapshot_waited_s = live_tools_service.wait_for_fresh_snapshot(
-            max_wait_s=LIVE_COUNT_SYNC_WAIT_SECONDS,
-            quiet_s=LIVE_COUNT_SYNC_QUIET_SECONDS,
+            wait_s=LIVE_COUNT_SYNC_WAIT_SECONDS,
         )
 
     rows = live_tools_service.get_driver_positions(zone_id=zone_id)
@@ -299,8 +265,7 @@ def get_drivers_by_status_in_zone(
     snapshot_waited_s = 0.0
     if sync_live:
         snapshot_waited_s = live_tools_service.wait_for_fresh_snapshot(
-            max_wait_s=LIVE_COUNT_SYNC_WAIT_SECONDS,
-            quiet_s=LIVE_COUNT_SYNC_QUIET_SECONDS,
+            wait_s=LIVE_COUNT_SYNC_WAIT_SECONDS,
         )
 
     rows = live_tools_service.get_driver_positions(zone_id=zone_id)
